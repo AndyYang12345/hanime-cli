@@ -172,12 +172,18 @@ class KittyGraphics:
     def display_image(self, data: bytes, *,
                       row: int = 0, col: int = 0,
                       image_id: int = 0, z_index: int = -1,
-                      quiet: bool = True) -> int:
+                      quiet: bool = True,
+                      img_cols: int = 0, img_rows: int = 0) -> int:
         """
         Display a PNG image at the specified terminal position.
 
         Uses chunked base64 transmission (4096 bytes per chunk).
         Control data: a=T (transmit+display), f=100 (PNG), C=1 (don't move cursor).
+
+        *img_cols* / *img_rows* control the display size in terminal cells.
+        When only one dimension is given the other is auto-calculated to
+        preserve aspect ratio.  When both are 0 (the default) the image
+        is displayed at its native pixel size.
 
         Returns the image_id.
         """
@@ -193,6 +199,10 @@ class KittyGraphics:
             "C=1",
             f"z={z_index}",
         ]
+        if img_cols > 0:
+            ctrl_parts.append(f"c={img_cols}")
+        if img_rows > 0:
+            ctrl_parts.append(f"r={img_rows}")
         ctrl_str = ",".join(ctrl_parts)
 
         # Base64 encode the image data
@@ -223,9 +233,15 @@ class KittyGraphics:
         ctrl = f"a=d,d=I,i={image_id},q=2"
         self.t.send(APC_START + ctrl.encode("ascii") + b";" + APC_END)
 
-    def display_image_url(self, url: str, **kwargs) -> Optional[int]:
+    def display_image_url(self, url: str, *,
+                          row: int = 0, col: int = 0,
+                          image_id: int = 0, z_index: int = -1,
+                          quiet: bool = True,
+                          img_cols: int = 0, img_rows: int = 0) -> Optional[int]:
         """
         Download image from URL using cloudscraper and display it.
+
+        Keyword arguments are forwarded to :meth:`display_image`.
 
         Returns the image_id on success, or None if the download fails
         or cloudscraper is not available.
@@ -241,7 +257,11 @@ class KittyGraphics:
         try:
             resp = scraper.get(url, timeout=10)
             if resp.status_code == 200:
-                return self.display_image(resp.content, **kwargs)
+                return self.display_image(
+                    resp.content, row=row, col=col, image_id=image_id,
+                    z_index=z_index, quiet=quiet,
+                    img_cols=img_cols, img_rows=img_rows,
+                )
         except Exception:
             pass
         return None
