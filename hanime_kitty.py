@@ -63,11 +63,8 @@ POSTER_COLS = 50         # video-detail poster
 SEARCH_ROW = 1           # search-bar / search-hint row (0-indexed)
 BANNER_HEADER_ROW = 2    # "▼ 头版推荐" header
 BANNER_IMG_ROW = 3       # banner image top
-BANNER_IMG_ROWS = 10     # estimated banner image height in cells
 CAT_START_ROW = 14       # first category row (after banner)
-CAT_IMG_ROWS = 3         # category thumbnail height in cells
 RESULT_START_ROW = 3     # first result row (after input + underline)
-RESULT_IMG_ROWS = 4      # search result thumbnail height
 
 # Colour palette
 ACCENT = rgb_fg(100, 200, 255)
@@ -91,8 +88,9 @@ class App:
         self._screens: list[Screen] = []
         self._running = False
         self._job_queue: queue.Queue = queue.Queue()
-        # URL → image_id cache so repeated thumbnails don't re-download
-        self._thumb_cache: dict[str, int] = {}
+        # Two-tier thumbnail cache: URL → image_id (kitty), URL → PNG bytes (network)
+        self._thumb_ids: dict[str, int] = {}       # URL → kitty image_id
+        self._thumb_data: dict[str, bytes] = {}    # URL → PNG bytes (downloaded once)
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -206,29 +204,36 @@ class App:
 
     # ── Thumbnail helpers ──────────────────────────────────────
 
-    def get_cached_thumb(self, url: str) -> int | None:
-        """Return cached image_id for *url*, or None."""
-        return self._thumb_cache.get(url)
-
-    def cache_thumb(self, url: str, image_id: int):
-        """Store *image_id* for *url*."""
-        self._thumb_cache[url] = image_id
-
     def display_thumb(self, img_data: bytes, row: int, col: int,
                       img_cols: int, url: str = "") -> int:
-        """Display a thumbnail (or placeholder), returning the image_id."""
-        image_id = 0
-        if url:
-            cached = self._thumb_cache.get(url)
-            if cached:
-                image_id = cached
+        """Display a thumbnail at (row,col), caching both image_id and PNG data.
+
+        The image is placed with z_index=-1 so text drawn on top remains visible.
+        Returns the kitty image_id.
+        """
+        image_id = self._thumb_ids.get(url, 0) if url else 0
         image_id = self.gfx.display_image(
             img_data, row=row, col=col, image_id=image_id,
             img_cols=img_cols, quiet=True,
         )
-        if url and url not in self._thumb_cache:
-            self._thumb_cache[url] = image_id
+        if url:
+            self._thumb_ids[url] = image_id
+            self._thumb_data[url] = img_data  # cache PNG bytes for instant redraw
         return image_id
+
+    def has_thumb_data(self, url: str) -> bool:
+        """Check if PNG data for *url* is already downloaded and cached."""
+        return url in self._thumb_data
+
+    def thumb_rows(self, img_cols: int) -> int:
+        """Estimate cell rows a thumbnail will occupy at the given column width.
+
+        Assumes a 16:9 aspect ratio for video thumbnails/posters.
+        """
+        t = self.t
+        if t.cell_h > 0 and t.cell_w > 0:
+            return max(2, int(img_cols * t.cell_w * 9 / 16 / t.cell_h))
+        return max(2, img_cols // 2)  # fallback
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -244,8 +249,6 @@ class HomeScreen(Screen):
         self._loading = True
         self._error: str = ""
         self._scroll_offset = 0      # first visible category index
-        self._banner_img_id = 0
-        self._thumb_img_ids: dict[str, int] = {}   # url → image_id
         self._max_visible_cats = 0   # computed on draw
 
     # ── Lifecycle ──────────────────────────────────────────────
@@ -278,20 +281,18 @@ class HomeScreen(Screen):
         self._load_thumbnails()
 
     def _load_thumbnails(self):
-        """Download category thumbnails progressively, displaying each as it arrives."""
+        """Download uncached category thumbnails progressively."""
         if not self.data:
             return
-        # Collect (url, video_url) pairs
         jobs: list[tuple[str, str]] = []
         for cat in self.data.categories:
             for v in cat.videos:
-                if v.thumbnail and v.thumbnail not in self._thumb_img_ids:
+                if v.thumbnail and not self.app.has_thumb_data(v.thumbnail):
                     jobs.append((v.thumbnail, v.url))
         if not jobs:
             return
 
         def _download_sequentially():
-            """Download one at a time; enqueue each result individually."""
             for thumb_url, video_url in jobs:
                 data = download_thumbnail(thumb_url)
                 self.app._job_queue.put(
@@ -301,31 +302,35 @@ class HomeScreen(Screen):
         self.app.run_in_background(_download_sequentially, lambda _: None)
 
     def _on_single_thumb(self, result: tuple):
-        """Display a single downloaded thumbnail (called per-thumb, progressively)."""
+        """Display a single downloaded thumbnail (called progressively)."""
         if self is not self.app.current_screen:
             return
         thumb_url, video_url, img_data = result
-        if img_data and video_url not in self._thumb_img_ids:
-            self._thumb_img_ids[video_url] = True
-            self._redraw_single_thumb(video_url, img_data)
+        if not img_data:
+            return
+        # Cache in App so future redraws can display instantly
+        self.app._thumb_data[thumb_url] = img_data
+        # Find position and display
+        self._redraw_single_thumb(video_url, img_data)
 
     def _redraw_single_thumb(self, video_url: str, img_data: bytes):
-        """Redraw one thumbnail after download completes."""
+        """Display one thumbnail at its current layout position."""
         if not self.data:
             return
-        cat_offset = 0
+        thumb_rows = self.app.thumb_rows(THUMB_COLS)
+        cat_block = thumb_rows + 1
         for ci, cat in enumerate(self.data.categories):
             if ci < self._scroll_offset:
                 continue
             vis_idx = ci - self._scroll_offset
             if vis_idx >= self._max_visible_cats:
                 break
-            cat_row = CAT_START_ROW + vis_idx * (CAT_IMG_ROWS + 1)
+            cat_row = CAT_START_ROW + vis_idx * cat_block
             for vi, v in enumerate(cat.videos):
                 if v.url != video_url:
                     continue
                 col = 2 + vi * (THUMB_COLS + 1)
-                self.app.display_thumb(img_data, cat_row, col, THUMB_COLS, url=v.thumbnail)
+                self.app.display_thumb(img_data, cat_row + 1, col, THUMB_COLS, url=v.thumbnail)
                 return
 
     # ── Draw ───────────────────────────────────────────────────
@@ -378,7 +383,7 @@ class HomeScreen(Screen):
         )
 
     def _draw_banner(self):
-        """Draw the hero banner section."""
+        """Draw the hero banner section (text left, image right if URL available)."""
         if not self.data or not self.data.banner:
             return
         banner = self.data.banner
@@ -389,15 +394,14 @@ class HomeScreen(Screen):
         t.draw_text(BANNER_HEADER_ROW, 2, "▼ 头版推荐", style=BOLD)
         self.app.ui.draw_horizontal_separator(BANNER_HEADER_ROW + 1, 2, w - 2)
 
-        # Image region
+        banner_cols = min(BANNER_COLS, w - 30)
+        banner_rows = self.app.thumb_rows(banner_cols)
         img_r1 = BANNER_IMG_ROW
-        banner_cols = min(BANNER_COLS, w - 30)  # leave room for text
-        img_r2 = img_r1 + BANNER_IMG_ROWS - 1
+        img_r2 = img_r1 + banner_rows - 1
 
-        # Text column
+        # Text on the right
         text_col = 4 + banner_cols
         text_r = img_r1
-
         if banner.title:
             t.draw_text(text_r, text_col, banner.title,
                         style=BOLD, max_width=w - text_col - 2)
@@ -411,20 +415,26 @@ class HomeScreen(Screen):
             t.draw_text(text_r, text_col, tags_text,
                         style=ACCENT, max_width=w - text_col - 2)
 
-        # Banner image (progressive — show placeholder, then load)
+        # Banner image
         if banner.thumbnail:
-            # Dim placeholder rectangle
-            t.fill_rect(img_r1, 2, img_r2 - img_r1 + 1, banner_cols + 1, "░")
-            # Click zone on banner image
+            thumb_url = banner.thumbnail
+            if self.app.has_thumb_data(thumb_url):
+                # Cached — display immediately
+                self.app.display_thumb(
+                    self.app._thumb_data[thumb_url],
+                    img_r1, 2, banner_cols, url=thumb_url,
+                )
+            else:
+                # Placeholder + async download
+                t.fill_rect(img_r1, 2, banner_rows, banner_cols + 1, "░")
+                self.app.run_in_background(
+                    lambda u=thumb_url: download_thumbnail(u),
+                    lambda data, r=img_r1, bc=banner_cols, u=thumb_url:
+                        self._on_banner_img(data, u, r, bc),
+                )
+
             self.add_click_zone(img_r1, img_r2, 2, 2 + banner_cols,
                                "_on_video_click", banner.url)
-
-            # Background download
-            thumb_url = banner.thumbnail
-            self.app.run_in_background(
-                lambda: download_thumbnail(thumb_url),
-                lambda data: self._on_banner_img(data, thumb_url, img_r1, banner_cols),
-            )
 
     def _on_banner_img(self, img_data: bytes | None, url: str,
                        row: int, img_cols: int):
@@ -435,7 +445,7 @@ class HomeScreen(Screen):
             self.app.display_thumb(img_data, row, 2, img_cols, url=url)
 
     def _draw_categories(self):
-        """Draw visible category rows with thumbnail placeholders."""
+        """Draw visible category rows with thumbnails (instant if cached)."""
         if not self.data:
             return
         t = self.app.t
@@ -444,9 +454,10 @@ class HomeScreen(Screen):
         if not cats:
             return
 
-        # How many categories can we show?
-        avail_rows = (t.rows - 2) - CAT_START_ROW  # minus status bar
-        cat_block = CAT_IMG_ROWS + 1  # header + image rows
+        thumb_rows = self.app.thumb_rows(THUMB_COLS)
+        cat_block = thumb_rows + 1  # header + thumbnail rows
+
+        avail_rows = (t.rows - 2) - CAT_START_ROW
         self._max_visible_cats = max(0, min(
             len(cats) - self._scroll_offset,
             avail_rows // cat_block,
@@ -460,34 +471,42 @@ class HomeScreen(Screen):
             # Category header
             header = f"▼ {cat.name} ({len(cat.videos)}部)"
             t.draw_text(cat_row, 2, header, style=BOLD)
-            cat_row += 1
 
             # Thumbnails
             max_thumbs = min(len(cat.videos), (w - 4) // (THUMB_COLS + 1))
+            img_row = cat_row + 1  # images go below header
             for ti in range(max_thumbs):
                 v = cat.videos[ti]
                 col = 2 + ti * (THUMB_COLS + 1)
-                # Placeholder
-                placeholder = f"  {v.title[:THUMB_COLS - 2]:^{THUMB_COLS - 2}}"
-                for r_off in range(CAT_IMG_ROWS):
-                    if r_off == CAT_IMG_ROWS // 2:
-                        t.draw_text(cat_row + r_off, col, placeholder,
-                                    style=DIM, max_width=THUMB_COLS)
-                    else:
-                        t.fill_rect(cat_row + r_off, col, 1, THUMB_COLS, " ")
-                # Click zone
+                thumb_url = v.thumbnail
+
+                if thumb_url and self.app.has_thumb_data(thumb_url):
+                    # Already downloaded — display immediately, no network
+                    png_data = self.app._thumb_data[thumb_url]
+                    self.app.display_thumb(png_data, img_row, col, THUMB_COLS, url=thumb_url)
+                else:
+                    # Draw placeholder (empty rect with title)
+                    placeholder = f"{v.title[:THUMB_COLS - 2]:^{THUMB_COLS - 2}}"
+                    for r_off in range(thumb_rows):
+                        if r_off == thumb_rows // 2:
+                            t.draw_text(img_row + r_off, col, placeholder,
+                                        style=DIM, max_width=THUMB_COLS)
+                        else:
+                            t.fill_rect(img_row + r_off, col, 1, THUMB_COLS, " ")
+
+                # Click zone covers the thumbnail area
                 self.add_click_zone(
-                    cat_row, cat_row + CAT_IMG_ROWS - 1,
+                    img_row, img_row + thumb_rows - 1,
                     col, col + THUMB_COLS,
                     "_on_video_click", v.url,
                 )
 
-        # Scroll indicator
+        # Scroll indicators
         if self._scroll_offset > 0:
             t.draw_text(CAT_START_ROW + self._max_visible_cats * cat_block,
                         2, f"  ⬆ {self._scroll_offset} more above", style=DIM)
-        if self._scroll_offset + self._max_visible_cats < len(cats):
-            remaining = len(cats) - self._scroll_offset - self._max_visible_cats
+        remaining = len(cats) - self._scroll_offset - self._max_visible_cats
+        if remaining > 0:
             t.draw_text(CAT_START_ROW + self._max_visible_cats * cat_block,
                         2, f"  ⬇ {remaining} more below  (scroll)", style=DIM)
 
@@ -562,9 +581,6 @@ class SearchScreen(Screen):
         self._scroll_offset = 0
         self._result_count = 0
         self._max_visible = 0
-        self._placeholder = "..."
-        self._cursor_visible = True
-        self._cursor_toggle_time = time.time()
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -623,13 +639,14 @@ class SearchScreen(Screen):
         self.app.ui.draw_status_bar(status)
 
     def _draw_results(self):
-        """Draw the scrollable results list."""
+        """Draw the scrollable results list (cache-first for thumbnails)."""
         if not self.results:
             return
         t = self.app.t
         w = t.cols
+        thumb_rows = self.app.thumb_rows(RESULT_THUMB_COLS)
+        thumb_block = thumb_rows + 1  # image rows + spacer
         avail = t.rows - 2 - RESULT_START_ROW
-        thumb_block = RESULT_IMG_ROWS + 1  # image rows + spacer
         self._max_visible = max(0, min(
             len(self.results) - self._scroll_offset,
             avail // thumb_block,
@@ -644,16 +661,29 @@ class SearchScreen(Screen):
             prefix = "▶" if is_sel else " "
             style = b"\x1b[1;33m" if is_sel else b""
 
-            # Thumbnail placeholder region
             thumb_c1 = 3
-            thumb_width = RESULT_THUMB_COLS
+            thumb_url = v.thumbnail
 
-            # Draw placeholder border
-            for r_off in range(RESULT_IMG_ROWS):
-                t.fill_rect(row + r_off, thumb_c1, 1, thumb_width, " ")
+            if thumb_url and self.app.has_thumb_data(thumb_url):
+                # Cached — display immediately
+                self.app.display_thumb(
+                    self.app._thumb_data[thumb_url],
+                    row, thumb_c1, RESULT_THUMB_COLS, url=thumb_url,
+                )
+            else:
+                # Placeholder
+                for r_off in range(thumb_rows):
+                    t.fill_rect(row + r_off, thumb_c1, 1, RESULT_THUMB_COLS, " ")
+                # Kick off download
+                if thumb_url:
+                    self.app.run_in_background(
+                        lambda u=thumb_url: download_thumbnail(u),
+                        lambda data, r=row, c=thumb_c1, u=thumb_url:
+                            self._on_thumb(data, r, c, u),
+                    )
 
-            # Title + meta
-            text_c = thumb_c1 + thumb_width + 2
+            # Title + meta (to the right of thumbnail)
+            text_c = thumb_c1 + RESULT_THUMB_COLS + 2
             t.draw_text(row, text_c, f"{prefix} {v.title}",
                         style=style, max_width=w - text_c - 2)
             meta_parts = []
@@ -668,21 +698,12 @@ class SearchScreen(Screen):
             t.draw_text(row + 1, text_c + 2, " · ".join(meta_parts),
                         style=DIM, max_width=w - text_c - 4)
 
-            # Click zone on thumbnail + text area
+            # Click zone
             self.add_click_zone(
-                row, row + RESULT_IMG_ROWS - 1,
+                row, row + thumb_rows - 1,
                 thumb_c1, w - 2,
                 "_on_result_click", ri,
             )
-
-            # Progressive thumbnail load
-            if v.thumbnail:
-                thumb_url = v.thumbnail
-                self.app.run_in_background(
-                    lambda u=thumb_url: download_thumbnail(u),
-                    lambda data, r=row, c=thumb_c1, u=thumb_url:
-                        self._on_thumb(data, r, c, u),
-                )
 
         # Scroll indicators
         if self._scroll_offset > 0:
@@ -832,8 +853,6 @@ class VideoDetailScreen(Screen):
         self.detail: VideoDetail | None = None
         self._loading = True
         self._error = ""
-        self._poster_img_id = 0
-        self._tag_row_start = 0
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -898,12 +917,7 @@ class VideoDetailScreen(Screen):
         # ── Poster ──────────────────────────────────────────
         poster_row = 2
         poster_cols = min(POSTER_COLS, w - 6)
-        poster_rows = max(8, int(poster_cols * 9 / 16))  # estimate 16:9
-
-        # Placeholder
-        t.fill_rect(poster_row, 2, poster_rows, poster_cols + 1, "░")
-        t.draw_text(poster_row + poster_rows // 2 - 1, 2 + poster_cols // 2 - 4,
-                    "LOADING…", style=DIM)
+        poster_rows = self.app.thumb_rows(poster_cols)
 
         # Click zone on poster → opens best URL
         best_url = d.sources[0][1] if d.sources else ""
@@ -913,14 +927,26 @@ class VideoDetailScreen(Screen):
             "_on_poster_click", best_url,
         )
 
-        # Download poster in background
-        if d.poster:
-            poster_url = d.poster
+        poster_url = d.poster
+        if poster_url and self.app.has_thumb_data(poster_url):
+            # Cached — display immediately, no placeholder needed
+            self.app.display_thumb(
+                self.app._thumb_data[poster_url],
+                poster_row, 2, poster_cols, url=poster_url,
+            )
+        elif poster_url:
+            # Placeholder (no text — would cover the image since z=-1)
+            t.fill_rect(poster_row, 2, poster_rows, poster_cols + 1, "░")
             self.app.run_in_background(
-                lambda: download_thumbnail(poster_url),
+                lambda u=poster_url: download_thumbnail(u),
                 lambda data, pr=poster_row, pc=poster_cols, pu=poster_url:
                     self._on_poster(data, pr, pc, pu),
             )
+        else:
+            # No poster URL at all
+            t.fill_rect(poster_row, 2, poster_rows, poster_cols + 1, " ")
+            t.draw_text(poster_row + poster_rows // 2, 2 + poster_cols // 2 - 5,
+                        "No poster", style=DIM)
 
         # ── Text metadata column (right of poster) ──────────
         text_col = 2 + poster_cols + 3
@@ -946,19 +972,12 @@ class VideoDetailScreen(Screen):
 
         for si, (res, url) in enumerate(d.sources):
             is_best = (si == 0)
-            label = f"{'⭐ ' if is_best else '   '}[{res}] {url}"
             style = SOURCE_COLOUR if is_best else DIM
-            # Truncate URL for display
-            display = label
-            if len(display) > w - 4:
-                # Keep URL visible but truncated
-                prefix = f"{'⭐ ' if is_best else '   '}[{res}] "
-                remain = w - 4 - len(prefix)
-                url_short = url[:max(0, remain - 3)] + "…" if remain > 10 else url[:remain]
-                display = prefix + url_short
-
+            prefix = f"{'⭐ ' if is_best else '   '}[{res}] "
+            remain = w - 6 - len(prefix)
+            url_short = url if len(url) <= remain else url[:remain - 1] + "…"
+            display = prefix + url_short
             t.draw_text(src_row, 4, display, style=style, max_width=w - 6)
-            # Click zone on source row
             self.add_click_zone(src_row, src_row, 4, w - 2,
                                "_on_source_click", url)
             src_row += 1
@@ -970,7 +989,6 @@ class VideoDetailScreen(Screen):
         if len(page_display) > w - 10:
             page_display = page_display[:w - 13] + "…"
         t.draw_text(src_row, 10, page_display, style=DIM, max_width=w - 12)
-        # Click zone on page URL
         self.add_click_zone(src_row, src_row, 10, w - 2,
                            "_on_source_click", d.page_url)
         src_row += 2
@@ -980,7 +998,6 @@ class VideoDetailScreen(Screen):
             t.draw_text(src_row, 2, "🏷 标签:", style=BOLD)
             self._tag_row_start = src_row
             src_row += 1
-
             tag_col = 4
             max_tag_col = w - 4
             for tag_text, search_param in d.tags:
@@ -990,18 +1007,21 @@ class VideoDetailScreen(Screen):
                     src_row += 1
                     tag_col = 4
                 t.draw_text(src_row, tag_col, display, style=TAG_COLOUR)
-                # Click zone on each tag
                 self.add_click_zone(
                     src_row, src_row,
                     tag_col, tag_col + tag_width,
                     "_on_tag_click", search_param,
                 )
-                tag_col += tag_width + 1  # gap between tags
+                tag_col += tag_width + 1
 
     def _on_poster(self, img_data: bytes | None, row: int, img_cols: int, url: str):
-        """Display the downloaded poster image."""
-        if img_data:
-            self.app.display_thumb(img_data, row, 2, img_cols, url=url)
+        """Display the downloaded poster, clearing placeholder text first."""
+        if not img_data:
+            return
+        # Clear placeholder text BEFORE displaying image (images are z=-1 behind text)
+        poster_rows = self.app.thumb_rows(img_cols)
+        self.app.t.fill_rect(row, 2, poster_rows, img_cols + 1, " ")
+        self.app.display_thumb(img_data, row, 2, img_cols, url=url)
 
     # ── Event handlers ─────────────────────────────────────────
 
