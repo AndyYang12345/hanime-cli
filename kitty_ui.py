@@ -162,6 +162,43 @@ class Terminal:
             )
         self._buf.flush()
 
+    def clear_rect(self, row: int, col: int, h: int, w: int):
+        """Clear a rectangular region (fill with spaces)."""
+        self.fill_rect(row, col, h, w, " ")
+
+    # ── Scroll regions ─────────────────────────────────────
+
+    def set_scroll_region(self, top: int, bottom: int):
+        """Set terminal scroll region (inclusive). Rows outside are unaffected.
+
+        ``CSI <top+1> ; <bottom+1> r``
+        """
+        self.send(f"\x1b[{top + 1};{bottom + 1}r".encode())
+
+    def reset_scroll_region(self):
+        """Reset scroll region to full screen.  ``CSI r``"""
+        self.send(b"\x1b[r")
+
+    def scroll_up(self, n: int = 1):
+        """Scroll content UP by N lines within the scroll region.
+
+        Content shifts upward; N blank lines appear at the bottom.
+        Lines that scroll past the top of the region are lost.
+        ``CSI <n> S``
+        """
+        if n > 0:
+            self.send(f"\x1b[{n}S".encode())
+
+    def scroll_down(self, n: int = 1):
+        """Scroll content DOWN by N lines within the scroll region.
+
+        Content shifts downward; N blank lines appear at the top.
+        Lines that scroll past the bottom of the region are lost.
+        ``CSI <n> T``
+        """
+        if n > 0:
+            self.send(f"\x1b[{n}T".encode())
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Section 3: KittyGraphics class
