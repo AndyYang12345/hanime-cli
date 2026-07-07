@@ -199,6 +199,10 @@ class KittyGraphics:
         if not image_id:
             image_id = self.next_id()
 
+        # Move cursor to target position BEFORE sending image data.
+        # The Kitty protocol places the image at the current cursor position.
+        self.t.move_to(row, col)
+
         # Build control data string (used in first chunk only)
         ctrl_parts = [
             "a=T",
