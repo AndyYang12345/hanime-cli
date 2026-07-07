@@ -97,10 +97,19 @@ class Terminal:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.old_termios)
 
     def query_size(self):
-        """Query terminal pixel and cell dimensions using TIOCGWINSZ ioctl."""
-        buf = array.array("H", [0, 0, 0, 0])
-        fcntl.ioctl(sys.stdout, termios.TIOCGWINSZ, buf)
-        self.rows, self.cols, self.px_w, self.px_h = buf
+        """Query terminal pixel and cell dimensions using TIOCGWINSZ ioctl.
+
+        Falls back to sensible defaults (80×24, 800×600 px) when stdout is not
+        a terminal or the ioctl is not supported.
+        """
+        try:
+            buf = array.array("H", [0, 0, 0, 0])
+            fcntl.ioctl(sys.stdout, termios.TIOCGWINSZ, buf)
+            self.rows, self.cols, self.px_w, self.px_h = buf
+        except (OSError, IOError):
+            # Non-terminal stdout (pipe, redirect) — use fallback
+            self.rows, self.cols = 24, 80
+            self.px_w, self.px_h = 800, 600
         if self.cols > 0:
             self.cell_w = self.px_w // self.cols
             self.cell_h = self.px_h // self.rows

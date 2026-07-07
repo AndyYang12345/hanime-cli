@@ -98,6 +98,16 @@ class App:
 
     def run(self, initial_query: str = ""):
         """Enter raw mode, show first screen, start event loop."""
+        # Check we're running inside Kitty (or another terminal with graphics support)
+        term = os.environ.get("TERM", "")
+        if "kitty" not in term:
+            print(
+                "WARNING: This app requires the Kitty terminal for graphics support.\n"
+                f"         Current TERM={term or '(unset)'}. Images will not render.\n"
+                "         Run with:  kitty python hanime_kitty.py",
+                file=sys.stderr,
+            )
+
         install_resize_handler()
         self.t.enter_raw()
         self.kbd.enable()
