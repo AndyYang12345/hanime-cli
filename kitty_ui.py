@@ -11,6 +11,7 @@ Requires Kitty terminal for full graphics protocol support.
 
 import sys
 import re
+import io
 import base64
 import fcntl
 import termios
@@ -166,6 +167,31 @@ class Terminal:
 # Section 3: KittyGraphics class
 # ═══════════════════════════════════════════════════════════════════
 
+def _ensure_png(data: bytes) -> bytes:
+    """Return *data* unchanged if it is already PNG, otherwise convert to PNG.
+
+    hanime1.me serves thumbnails as JPEG; the Kitty Graphics Protocol
+    (``f=100``) only accepts PNG, so we convert via Pillow when needed.
+    """
+    # PNG magic bytes
+    if data[:4] == b"\x89PNG":
+        return data
+    # Try Pillow conversion (handles JPEG, WebP, GIF, etc.)
+    try:
+        from PIL import Image
+    except ImportError:
+        # Pillow not available — return as-is; the terminal will reject it
+        return data
+    img = Image.open(io.BytesIO(data))
+    buf = io.BytesIO()
+    # Preserve RGBA if present, otherwise save as RGB PNG
+    if img.mode in ("RGBA", "PA", "LA"):
+        img.save(buf, format="PNG")
+    else:
+        img.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class KittyGraphics:
     """Kitty Graphics Protocol -- display/delete pixel images in terminal."""
 
@@ -203,6 +229,9 @@ class KittyGraphics:
         # The Kitty protocol places the image at the current cursor position.
         self.t.move_to(row, col)
 
+        # Ensure we send PNG (hanime1.me thumbnails are JPEG)
+        png_data = _ensure_png(data)
+
         # Build control data string (used in first chunk only)
         ctrl_parts = [
             "a=T",
@@ -218,8 +247,8 @@ class KittyGraphics:
             ctrl_parts.append(f"r={img_rows}")
         ctrl_str = ",".join(ctrl_parts)
 
-        # Base64 encode the image data
-        b64_data = base64.standard_b64encode(data)
+        # Base64 encode the (now PNG) image data
+        b64_data = base64.standard_b64encode(png_data)
 
         # Split into <= 4096 byte chunks and transmit
         chunk_size = 4096
