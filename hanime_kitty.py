@@ -257,7 +257,7 @@ class HomeScreen(Screen):
             return
         self._loading = True
         self._error = ""
-        self._draw_loading()
+        self.draw()  # shows "Loading homepage…" via the loading branch
         self.app.run_in_background(fetch_homepage, self._on_data_loaded)
 
     def on_resize(self):
