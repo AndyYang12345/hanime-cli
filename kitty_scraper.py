@@ -532,6 +532,11 @@ def download_thumbnail(url: str) -> bytes | None:
 def _parse_banner(soup: BeautifulSoup) -> tuple[VideoResult | None, list[str]]:
     """Parse the hero banner (``#home-banner-wrapper``).
 
+    The banner image (``<img>``) lives in the **parent** ``<div>`` of
+    ``#home-banner-wrapper``, not inside the wrapper itself.  The play
+    button may lack an ``href``, in which case we derive the video URL
+    from the thumbnail filename.
+
     Args:
         soup: Parsed BeautifulSoup of the homepage.
 
@@ -560,24 +565,39 @@ def _parse_banner(soup: BeautifulSoup) -> tuple[VideoResult | None, list[str]]:
             if tag_text:
                 tags.append(tag_text)
 
-    # Play link
+    # Play link — the button may have no href (JS-driven); fall back to
+    # deriving the URL from the thumbnail image filename.
     play_btn = banner.select_one("a.home-banner-play-btn")
     play_url = play_btn.get("href", "") if play_btn else ""
     if play_url and not play_url.startswith("http"):
-        play_url = BASE_URL + play_url
+        play_url = urljoin(BASE_URL, play_url)
 
-    # Thumbnail — try <img> first, then background-image in style
+    # Thumbnail — the <img> is in the PARENT div, not inside the wrapper.
+    # Also try background-image on the banner itself as a fallback.
     thumbnail = ""
-    banner_img = banner.select_one("img")
-    if banner_img:
-        thumbnail = banner_img.get("src", "")
+    parent = banner.parent
+    if parent:
+        parent_img = parent.select_one("img")
+        if parent_img:
+            thumbnail = parent_img.get("src", "") or parent_img.get("data-src", "")
+    if not thumbnail:
+        banner_img = banner.select_one("img")
+        if banner_img:
+            thumbnail = banner_img.get("src", "")
     if not thumbnail:
         style = banner.get("style", "")
         bg_match = re.search(r'url\(["\']?([^"\')\s]+)["\']?\)', style)
         if bg_match:
             thumbnail = bg_match.group(1)
             if thumbnail and not thumbnail.startswith("http"):
-                thumbnail = BASE_URL + thumbnail
+                thumbnail = urljoin(BASE_URL, thumbnail)
+
+    # If the play button has no href, derive the video URL from the
+    # thumbnail filename:  …/thumbnail/406658h.jpg → watch?v=406658
+    if not play_url and thumbnail:
+        m = re.search(r'/thumbnail/(\d+)', thumbnail)
+        if m:
+            play_url = f"{BASE_URL}/watch?v={m.group(1)}"
 
     video = VideoResult(
         title=title,
