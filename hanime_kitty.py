@@ -636,6 +636,7 @@ class HomeScreen(Screen):
 
         Uses terminal scroll regions so that existing Kitty Graphics images
         move with the text — no image re-transmission needed for middle rows.
+        The scroll region includes the banner so it scrolls with categories.
         Falls back to full redraw when the delta is too large.
         """
         old_offset = self._scroll_offset
@@ -653,6 +654,8 @@ class HomeScreen(Screen):
 
         cb = self._last_cat_block or self.cat_block
         content_end = self.app.t.rows - 2
+        # Include the banner in the scroll region so it scrolls with categories
+        scroll_top = BANNER_HEADER_ROW
 
         # Fall back to full redraw if delta is too large or layout changed
         if abs(delta) >= self._max_visible_cats or cb != self.cat_block:
@@ -660,12 +663,11 @@ class HomeScreen(Screen):
             return
 
         self.clear_click_zones()
-        self.app.t.set_scroll_region(self.cat_start_row, content_end)
+        self.app.t.set_scroll_region(scroll_top, content_end)
 
         if delta > 0:
-            # Scrolling down — content moves UP
+            # Scrolling down — content moves UP (banner + categories shift up)
             self.app.t.scroll_up(delta * cb)
-            # Draw new categories at the bottom
             for i in range(delta):
                 slot = self._max_visible_cats - delta + i
                 ci = new_offset + slot
@@ -674,7 +676,6 @@ class HomeScreen(Screen):
         else:
             # Scrolling up — content moves DOWN
             self.app.t.scroll_down((-delta) * cb)
-            # Draw new categories at the top
             for i in range(-delta):
                 ci = new_offset + i
                 if ci < len(cats):
@@ -682,16 +683,36 @@ class HomeScreen(Screen):
 
         self.app.t.reset_scroll_region()
 
-        # Rebuild click zones for all visible categories (cheap in-memory op)
+        # Redraw the banner when we've scrolled back to the very top,
+        # because ANSI scroll-up discards content that moves past the
+        # top of the scroll region and scroll-down fills it with blanks.
+        if new_offset == 0:
+            self._draw_banner()
+
+        # Rebuild category click zones + re-add banner & header click zones
         self._rebuild_click_zones()
         self._draw_scroll_indicators()
 
     def _rebuild_click_zones(self):
-        """Re-register click zones for all currently visible categories.
+        """Re-register all click zones after incremental scroll.
 
-        Called after incremental scroll because scroll regions shift cell
-        positions but click-zone data is stale.
+        ANSI scroll shifts cell positions but click-zone data is stale.
+        Rebuilds category zones, plus the always-visible header zones
+        and banner zones (when scrolled to top).
         """
+        # ── Title bar search zone (row 0, always present) ──
+        w = self.app.t.cols
+        self.add_click_zone(0, 0, w - 5, w - 1, "_on_search_click", None)
+
+        # ── Search hint zone (SEARCH_ROW, always present) ──
+        hint = "Press / or Enter to search — type anything to start"
+        c1 = max(2, (w - len(hint)) // 2)
+        self.add_click_zone(
+            SEARCH_ROW, SEARCH_ROW, c1, c1 + len(hint),
+            "_on_search_click", None,
+        )
+
+        # ── Category click zones ──
         if not self.data:
             return
         cats = self.data.categories
