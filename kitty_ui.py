@@ -625,11 +625,13 @@ class Screen:
         self.app = app
         self._active: bool = False
         self._click_zones: list[tuple] = []  # (r1, r2, c1, c2, action, data)
+        self._generation = 0  # incremented each time screen becomes active
 
     # ── Lifecycle ────────────────────────────────────────────
 
     def on_enter(self):
         """Called when screen becomes active. Override to draw initial state."""
+        self._generation += 1
 
     def on_leave(self):
         """Called when screen is being replaced. Override to clean up."""

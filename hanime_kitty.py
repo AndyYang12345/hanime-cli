@@ -66,6 +66,8 @@ BANNER_COLS_MIN, BANNER_COLS_MAX = 20, 50
 POSTER_COLS_MIN, POSTER_COLS_MAX = 20, 60
 RESULT_THUMB_MIN, RESULT_THUMB_MAX = 8, 18
 
+MAX_CACHED_THUMBS = 200
+
 # Colour palette
 ACCENT = rgb_fg(100, 200, 255)
 TAG_COLOUR = rgb_fg(180, 130, 255)
@@ -223,8 +225,19 @@ class App:
         )
         if url:
             self._thumb_ids[url] = image_id
-            self._thumb_data[url] = img_data  # cache PNG bytes for instant redraw
+            self._cache_thumb_data(url, img_data)
         return image_id
+
+    def _cache_thumb_data(self, url: str, data: bytes):
+        """Cache thumbnail PNG bytes with FIFO eviction when over limit."""
+        if len(self._thumb_data) >= MAX_CACHED_THUMBS:
+            # Evict oldest entry (FIFO — dicts maintain insertion order in Python 3.7+)
+            oldest = next(iter(self._thumb_data))
+            old_id = self._thumb_ids.pop(oldest, 0)
+            if old_id:
+                self.gfx.delete_image(old_id)
+            del self._thumb_data[oldest]
+        self._thumb_data[url] = data
 
     def has_thumb_data(self, url: str) -> bool:
         """Check if PNG data for *url* is already downloaded and cached."""
@@ -310,6 +323,7 @@ class HomeScreen(Screen):
     # ── Lifecycle ──────────────────────────────────────────────
 
     def on_enter(self):
+        self._generation += 1
         if self.data is not None:
             self.draw()
             return
@@ -369,7 +383,7 @@ class HomeScreen(Screen):
         thumb_url, video_url, img_data = result
         if not img_data:
             return
-        self.app._thumb_data[thumb_url] = img_data
+        self.app._cache_thumb_data(thumb_url, img_data)
         self._redraw_single_thumb(video_url, img_data)
 
     def _redraw_single_thumb(self, video_url: str, img_data: bytes):
@@ -771,6 +785,7 @@ class SearchScreen(Screen):
     # ── Lifecycle ──────────────────────────────────────────────
 
     def on_enter(self):
+        self._generation += 1
         if self.results or self._loading:
             self.draw()
             return
@@ -1152,6 +1167,7 @@ class VideoDetailScreen(Screen):
     # ── Lifecycle ──────────────────────────────────────────────
 
     def on_enter(self):
+        self._generation += 1
         self._loading = True
         self._error = ""
         self._draw_loading()
