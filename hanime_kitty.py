@@ -292,15 +292,6 @@ class HomeScreen(Screen):
         return min(csr, self.app.t.rows - 4)
 
     @property
-    def thumb_rows(self) -> int:
-        return self.app.thumb_rows(self.thumb_cols)
-
-    @property
-    def cat_start_row(self) -> int:
-        """First category row (below banner + spacer)."""
-        return BANNER_IMG_ROW + self.banner_rows + 2
-
-    @property
     def cat_block(self) -> int:
         """Rows per category: header(1) + image rows + title row(1)."""
         return self.thumb_rows + 2
@@ -808,6 +799,12 @@ class SearchScreen(Screen):
         underline = "─" * min(len(display) + 2, w - c1 - 2)
         t.draw_text(SEARCH_ROW + 1, c1 - 1, underline, style=DIM)
 
+    def _draw_input_only(self):
+        """Redraw only the input area + status bar (no results re-render)."""
+        t = self.app.t
+        w = t.cols
+        t.clear_rect(SEARCH_ROW, 0, 3, w)
+        self._draw_input()
         status = ""
         if self._loading:
             status = "  ⏳ 搜索中…"
@@ -820,6 +817,7 @@ class SearchScreen(Screen):
         else:
             status = "  输入关键词搜索  ·  Esc返回首页"
         self.app.ui.draw_status_bar(status)
+
 
     def _draw_all_results(self):
         """Draw all visible result slots (full redraw path)."""
@@ -908,6 +906,17 @@ class SearchScreen(Screen):
     def _on_thumb(self, img_data: bytes | None, row: int, col: int, url: str):
         if img_data:
             self.app.display_thumb(img_data, row, col, self.result_thumb_cols, url=url)
+
+    def _update_selection(self, old_idx: int, new_idx: int):
+        """Redraw only the two rows affected by a selection change."""
+        if not self.results:
+            return
+        old_slot = old_idx - self._scroll_offset
+        new_slot = new_idx - self._scroll_offset
+        if 0 <= old_slot < self._max_visible:
+            self._draw_one_result(old_idx, old_slot)
+        if 0 <= new_slot < self._max_visible:
+            self._draw_one_result(new_idx, new_slot)
 
     # ═══════════════════════════════════════════════════════════
     # Incremental scroll
@@ -1046,19 +1055,21 @@ class SearchScreen(Screen):
             return True
         elif code == 65:  # Up arrow
             if self._selected_idx > 0:
+                old_idx = self._selected_idx
                 self._selected_idx -= 1
                 if self._selected_idx < self._scroll_offset:
                     self._scroll_results(self._selected_idx)
                 else:
-                    self.draw()
+                    self._update_selection(old_idx, self._selected_idx)
             return True
         elif code == 66:  # Down arrow
             if self.results and self._selected_idx < len(self.results) - 1:
+                old_idx = self._selected_idx
                 self._selected_idx += 1
                 if self._selected_idx >= self._scroll_offset + self._max_visible:
                     self._scroll_results(self._scroll_offset + 1)
                 else:
-                    self.draw()
+                    self._update_selection(old_idx, self._selected_idx)
             return True
         return False
 
@@ -1090,7 +1101,7 @@ class SearchScreen(Screen):
             self.query += text
         else:
             return False
-        self.draw()
+        self._draw_input_only()
         return True
 
     def _on_result_click(self, idx: int):
