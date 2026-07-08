@@ -517,8 +517,10 @@ class HomeScreen(Screen):
             return
         gen = self._generation
         if img_data:
+            # Clear the placeholder rect (including "loading…" text) before placing image
+            img_rows = self.app.thumb_rows(img_cols)
+            self.app.t.clear_rect(row, 2, img_rows, img_cols + 1)
             self.app.display_thumb(img_data, row, 2, img_cols, url=url)
-            # Guard against mid-draw navigation race
             if gen != self._generation:
                 return
 
