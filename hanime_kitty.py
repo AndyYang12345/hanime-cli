@@ -305,14 +305,14 @@ class HomeScreen(Screen):
     @property
     def cat_start_row(self) -> int:
         """First category row (below banner + spacer). Guaranteed to leave room."""
-        csr = BANNER_IMG_ROW + self.banner_rows + 2
+        csr = BANNER_IMG_ROW + self.banner_rows + 3
         # Never push categories past the bottom margin
         return min(csr, self.app.t.rows - 4)
 
     @property
     def cat_block(self) -> int:
-        """Rows per category: header(1) + image rows + title row(1)."""
-        return self.thumb_rows + 2
+        """Rows per category: header(1) + image rows + title row(1) + gap(1)."""
+        return self.thumb_rows + 3
 
     @property
     def max_visible_cats(self) -> int:
@@ -562,6 +562,11 @@ class HomeScreen(Screen):
         tc = self.thumb_cols
         cb = self.cat_block
         cat_row = self.cat_start_row + slot * cb
+
+        # ── Inter-category separator (subtle dim line above header) ──
+        if slot > 0:
+            sep_row = cat_row - 1
+            t.draw_text(sep_row, 2, "─" * min(w - 4, 60), style=DIM)
 
         # ── Header ──
         header = f"▼ {cat.name} ({len(cat.videos)}部)"
