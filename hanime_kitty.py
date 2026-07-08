@@ -281,21 +281,25 @@ class HomeScreen(Screen):
     def thumb_cols(self) -> int:
         """Thumbnail width in cells, based on terminal width."""
         w = self.app.t.cols
-        thumbs_per_row = max(5, min(10, (w - 4) // 12))
-        return max(THUMB_COLS_MIN, min(THUMB_COLS_MAX, (w - 4) // thumbs_per_row - 1))
+        # ~7 thumbnails/row at 80 cols, scaling up on wider terminals
+        cols = (w - 4) // 8
+        return max(THUMB_COLS_MIN, min(THUMB_COLS_MAX, cols))
 
     @property
     def banner_cols(self) -> int:
-        """Banner width in cells."""
+        """Banner width in cells — ~40% of terminal width."""
         w = self.app.t.cols
-        return max(BANNER_COLS_MIN, min(BANNER_COLS_MAX, (w - 30) * 2 // 3))
+        return max(BANNER_COLS_MIN, min(BANNER_COLS_MAX, w * 2 // 5))
 
     @property
     def banner_rows(self) -> int:
-        """Banner height, capped so categories still have room in small terminals."""
+        """Banner height, capped so categories still have room in small terminals.
+
+        The banner takes at most ~25% of terminal rows so 2-3 categories
+        remain visible on a typical 40-60 row terminal."""
         br = self.app.thumb_rows(self.banner_cols)
-        # Leave at least 8 rows below the banner for categories + status bar
-        max_br = max(3, self.app.t.rows - BANNER_IMG_ROW - 8)
+        # Leave at least 75% of rows for categories + chrome
+        max_br = max(3, (self.app.t.rows - BANNER_IMG_ROW) // 4)
         return min(br, max_br)
 
     @property
@@ -303,16 +307,22 @@ class HomeScreen(Screen):
         return self.app.thumb_rows(self.thumb_cols)
 
     @property
+    def _cat_gap(self) -> int:
+        """Extra inter-category gap — scales from 2 (small term) to 4 (large)."""
+        return 2 if self.app.t.rows < 50 else 3 if self.app.t.rows < 70 else 4
+
+    @property
     def cat_start_row(self) -> int:
         """First category row (below banner + spacer). Guaranteed to leave room."""
-        csr = BANNER_IMG_ROW + self.banner_rows + 3
+        banner_gap = max(2, self.banner_rows // 4)
+        csr = BANNER_IMG_ROW + self.banner_rows + banner_gap
         # Never push categories past the bottom margin
         return min(csr, self.app.t.rows - 4)
 
     @property
     def cat_block(self) -> int:
-        """Rows per category: header(1) + image rows + title row(1) + gap(1)."""
-        return self.thumb_rows + 3
+        """Rows per category: header(1) + image rows + title(1) + inter-category gap."""
+        return self.thumb_rows + 2 + self._cat_gap
 
     @property
     def max_visible_cats(self) -> int:
@@ -563,10 +573,10 @@ class HomeScreen(Screen):
         cb = self.cat_block
         cat_row = self.cat_start_row + slot * cb
 
-        # ── Inter-category separator (subtle dim line above header) ──
+        # ── Inter-category separator (subtle dim line in the gap above header) ──
         if slot > 0:
             sep_row = cat_row - 1
-            t.draw_text(sep_row, 2, "─" * min(w - 4, 60), style=DIM)
+            t.draw_text(sep_row, 2, "─" * (w - 4), style=DIM)
 
         # ── Header ──
         header = f"▼ {cat.name} ({len(cat.videos)}部)"
