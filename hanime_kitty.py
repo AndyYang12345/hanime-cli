@@ -493,18 +493,34 @@ class HomeScreen(Screen):
                     self.app._thumb_data[thumb_url], img_r1, 2, bc, url=thumb_url)
             else:
                 t.fill_rect(img_r1, 2, br, bc + 1, "░")
+                # Draw a subtle hint that the image is loading
+                t.draw_text(img_r1 + br // 2, 2 + bc // 2 - 4, "loading…", style=DIM)
                 self.app.run_in_background(
                     lambda u=thumb_url: download_thumbnail(u),
                     lambda data, r=img_r1, b=bc, u=thumb_url:
                         self._on_banner_img(data, u, r, b),
                 )
-            self.add_click_zone(img_r1, img_r2, 2, 2 + bc, "_on_video_click", banner.url)
+        else:
+            # No thumbnail URL — draw placeholder so the area is still visible
+            t.fill_rect(img_r1, 2, br, bc + 1, "░")
+            t.draw_text(img_r1 + br // 2, 2 + bc // 2 - 6, "No poster", style=DIM)
+
+        # Click zone covers both the image area AND the text column
+        # (always registered, even when thumbnail is missing)
+        self.add_click_zone(img_r1, img_r1 + br - 1, 2, 2 + bc, "_on_video_click", banner.url)
+        if text_col < w - 2:
+            self.add_click_zone(img_r1, img_r1 + br - 1, text_col, w - 2,
+                               "_on_video_click", banner.url)
 
     def _on_banner_img(self, img_data: bytes | None, url: str, row: int, img_cols: int):
         if self is not self.app.current_screen:
             return
+        gen = self._generation
         if img_data:
             self.app.display_thumb(img_data, row, 2, img_cols, url=url)
+            # Guard against mid-draw navigation race
+            if gen != self._generation:
+                return
 
     # ═══════════════════════════════════════════════════════════
     # Category drawing (used by both full draw & incremental scroll)
