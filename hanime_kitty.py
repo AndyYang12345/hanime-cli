@@ -88,6 +88,7 @@ class App:
         self._screens: list[Screen] = []
         self._running = False
         self._job_queue: queue.Queue = queue.Queue()
+        self._last_resize_time = 0.0
         # Two-tier thumbnail cache: URL → image_id (kitty), URL → PNG bytes (network)
         self._thumb_ids: dict[str, int] = {}       # URL → kitty image_id
         self._thumb_data: dict[str, bytes] = {}    # URL → PNG bytes (downloaded once)
@@ -123,12 +124,16 @@ class App:
     def _event_loop(self):
         """Main loop: resize → jobs → input → dispatch."""
         while self._running:
-            # ── Handle terminal resize ──
+            # ── Handle terminal resize (debounced) ──
+            RESIZE_COOLDOWN = 0.1  # seconds
             global resize_pending
             if resize_pending:
-                resize_pending = False
-                self.t.query_size()
-                self.current_screen.on_resize()
+                now = time.time()
+                if now - self._last_resize_time >= RESIZE_COOLDOWN:
+                    resize_pending = False
+                    self._last_resize_time = now
+                    self.t.query_size()
+                    self.current_screen.on_resize()
 
             # ── Process background-job results ──
             self._process_jobs()
@@ -339,6 +344,12 @@ class HomeScreen(Screen):
             for v in cat.videos:
                 if v.thumbnail and not self.app.has_thumb_data(v.thumbnail):
                     jobs.append((v.thumbnail, v.url))
+        # Build position index for O(1) thumbnail lookup
+        self._thumb_pos_index: dict[str, tuple[int, int]] = {}
+        for ci, cat in enumerate(self.data.categories):
+            for vi, v in enumerate(cat.videos):
+                if v.thumbnail:
+                    self._thumb_pos_index[v.url] = (ci, vi)
         if not jobs:
             return
 
@@ -362,26 +373,24 @@ class HomeScreen(Screen):
         self._redraw_single_thumb(video_url, img_data)
 
     def _redraw_single_thumb(self, video_url: str, img_data: bytes):
-        """Display one thumbnail at its current layout position."""
+        """Display one thumbnail at its current layout position. O(1) lookup."""
         if not self.data:
             return
-        tc = self.thumb_cols
-        cb = self.cat_block
-        for ci, cat in enumerate(self.data.categories):
-            if ci < self._scroll_offset:
-                continue
-            vis_idx = ci - self._scroll_offset
-            if vis_idx >= self._max_visible_cats:
-                break
-            cat_row = self.cat_start_row + vis_idx * cb
+        pos = self._thumb_pos_index.get(video_url)
+        if pos is None:
+            return
+        ci, vi = pos
+        # Only draw if this category is currently visible
+        slot = ci - self._scroll_offset
+        if 0 <= slot < self._max_visible_cats:
+            tc = self.thumb_cols
+            cb = self._last_cat_block or self.cat_block
+            cat_row = self.cat_start_row + slot * cb
             img_row = cat_row + 1
-            for vi, v in enumerate(cat.videos):
-                if v.url != video_url:
-                    continue
-                col = 2 + vi * (tc + 1)
-                if col + tc <= self.app.t.cols - 2:
-                    self.app.display_thumb(img_data, img_row, col, tc, url=v.thumbnail)
-                return
+            col = 2 + vi * (tc + 1)
+            if col + tc <= self.app.t.cols - 2:
+                thumb_url = self.data.categories[ci].videos[vi].thumbnail
+                self.app.display_thumb(img_data, img_row, col, tc, url=thumb_url)
 
     # ═══════════════════════════════════════════════════════════
     # Full draw (first render, resize, navigation back)
